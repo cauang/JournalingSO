@@ -1,0 +1,19 @@
+# Compilados Java
+out/
+
+# Estado do sistema de arquivos gerado em execução
+data/
+
+# Arquivos de projeto de IDEs
+.idea/
+*.iml
+.vscode/
+*.classpath
+*.project
+.settings/
+
+# MacOS
+.DS_Store
+
+# Windows
+Thumbs.db

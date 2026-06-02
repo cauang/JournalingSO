@@ -1,0 +1,276 @@
+================================================================================
+           RELATÓRIO - SIMULADOR DE SISTEMA DE ARQUIVOS COM JOURNALING
+================================================================================
+
+Disciplina : Sistemas Operacionais
+Atividade  : Simulador de Sistema de Arquivos (2 pontos)
+Integrantes: [NOME 1] e [NOME 2]
+Link GitHub: https://github.com/SEU_USUARIO/SEU_REPOSITORIO
+
+================================================================================
+PARTE 1 - INTRODUÇÃO AO SISTEMA DE ARQUIVOS COM JOURNALING
+================================================================================
+
+O QUE É UM SISTEMA DE ARQUIVOS?
+---------------------------------
+Um sistema de arquivos é a estrutura lógica que o sistema operacional usa para
+organizar, armazenar e recuperar dados em um dispositivo de armazenamento, como
+HD, SSD ou pendrive. Sem ele, todos os dados no disco seriam apenas uma sequência
+contínua de bytes, sem qualquer organização.
+
+É o sistema de arquivos que define como os arquivos são nomeados, como os
+diretórios são hierarquizados, como o espaço em disco é alocado e como os
+metadados (nome, tamanho, data de modificação, permissões) são gerenciados.
+
+Exemplos de sistemas de arquivos reais:
+  - ext4    → padrão no Linux
+  - NTFS    → padrão no Windows
+  - APFS    → padrão no macOS
+  - FAT32   → usado em pendrives e cartões de memória
+
+O QUE É JOURNALING?
+---------------------
+Quando o sistema operacional salva um arquivo, o processo envolve múltiplas
+operações internas: atualizar o diretório, alocar espaço no disco, gravar os
+dados nos blocos físicos, atualizar a tabela de alocação, entre outras.
+
+Se o sistema sofrer uma queda de energia ou trava durante esse processo, o
+sistema de arquivos pode ficar em um estado inconsistente — por exemplo, um
+arquivo pode aparecer listado no diretório mas sem dados gravados, ou blocos de
+disco ficarem marcados como ocupados sem referência a nenhum arquivo.
+
+O Journaling é a técnica que resolve esse problema. Antes de realizar qualquer
+modificação real no sistema de arquivos, o sistema operacional registra a
+intenção da operação em uma área especial chamada "journal" ou "log". Assim:
+
+  - Se o sistema cair ANTES de concluir a operação: o journal mostra que ela
+    não foi confirmada, então é descartada (Undo). O sistema permanece íntegro.
+
+  - Se o sistema cair DEPOIS de registrar a confirmação (commit): o journal
+    mostra que a operação foi concluída mas ainda não aplicada ao disco principal,
+    então é reexecutada automaticamente (Redo).
+
+Essa técnica é chamada de Write-Ahead Logging (WAL): o log é sempre escrito
+ANTES de qualquer modificação real ser aplicada.
+
+TIPOS DE JOURNALING:
+----------------------
+1. Write-Ahead Logging (WAL):
+   Registra a operação completa no log antes de aplicá-la. Em caso de falha,
+   o sistema relê o log e decide fazer Redo (operação concluída) ou Undo
+   (operação incompleta). É o tipo implementado neste projeto.
+
+2. Metadata Journaling:
+   Registra apenas os metadados no log (estrutura de diretórios, alocação de
+   blocos), mas não os dados reais dos arquivos. É o modo padrão do ext3/ext4
+   e do NTFS. Oferece bom desempenho com proteção razoável.
+
+3. Full Journaling:
+   Registra tanto os metadados quanto os dados reais dos arquivos no log.
+   É o modo mais seguro, mas também o mais lento, pois toda escrita é feita
+   duas vezes (no log e no disco principal).
+
+4. Log-Structured File System (LFS):
+   Trata o sistema de arquivos inteiro como um único log circular. Todas as
+   escritas são sequenciais e adicionadas ao final do log. Melhora o
+   desempenho de escrita e simplifica a recuperação, mas complica a leitura.
+
+================================================================================
+PARTE 2 - ARQUITETURA DO SIMULADOR
+================================================================================
+
+VISÃO GERAL:
+-------------
+O simulador foi organizado em três camadas:
+
+  model/    → Estruturas de dados (FSNode, File, Directory)
+  service/  → Lógica do sistema de arquivos e gerenciamento do journal
+  shell/    → Interface de linha de comando interativa
+
+ESTRUTURA DE DADOS:
+--------------------
+O sistema de arquivos é representado em memória como uma árvore, onde cada
+nó é um objeto Java:
+
+  / (raiz - Directory)
+  ├── documentos/ (Directory)
+  │   └── relatorio.txt (File)
+  └── trabalhos/ (Directory)
+      └── so.txt (File)
+
+As classes utilizadas são:
+
+  FSNode (abstrata):
+    Superclasse base para todos os nós da árvore. Armazena atributos comuns
+    como nome, referência ao nó pai e data de modificação. Define os métodos
+    abstratos getTamanho() e ehDiretorio(). O método getCaminho() reconstrói
+    o caminho absoluto do nó percorrendo os pais recursivamente.
+    
+    Obs: o atributo "pai" é marcado como transient na serialização para evitar
+    referências circulares. Ao carregar o estado do disco, os pais são
+    reconstruídos pelo método resolverPais().
+
+  File (estende FSNode):
+    Representa um arquivo com conteúdo textual. O tamanho é calculado
+    dinamicamente com base no número de bytes do conteúdo.
+
+  Directory (estende FSNode):
+    Representa um diretório que pode conter outros nós (arquivos ou outros
+    diretórios). Os filhos são armazenados em um HashMap<String, FSNode>,
+    onde a chave é o nome do nó.
+
+JOURNALING — FORMATO DO LOG:
+------------------------------
+O arquivo data/journal.log registra cada operação em duas linhas:
+
+  ID|START|operacao|arg1_base64|arg2_base64
+  ID|COMMIT|operacao
+
+Exemplo real gerado pelo simulador:
+
+  1|START|mkdir|L3Byb2pldG9z
+  1|COMMIT|mkdir
+  2|START|write|L3Byb2pldG9zL3Jlc3Vtby50eHQ=|Q29udGV1ZG8u
+  2|COMMIT|write
+
+Os argumentos são codificados em Base64 para suportar espaços e caracteres
+especiais sem quebrar o formato delimitado por "|".
+
+PROCESSO DE RECUPERAÇÃO AO INICIAR:
+-------------------------------------
+  1. O simulador carrega o último estado salvo de filesystem.db (checkpoint)
+  2. Lê o journal.log e busca transações com START e COMMIT
+  3. Reexecuta cada uma dessas transações na árvore em memória
+  4. Salva um novo checkpoint e limpa o journal
+  
+  Se uma transação tem START mas NÃO tem COMMIT, ela é ignorada — indica que
+  o sistema caiu no meio da operação e não há dado consistente para recuperar.
+
+================================================================================
+PARTE 3 - IMPLEMENTAÇÃO EM JAVA
+================================================================================
+
+CLASSE FileSystemSimulator (service):
+---------------------------------------
+  Núcleo do sistema. Mantém a árvore de diretórios em memória (objeto raiz
+  do tipo Directory) e implementa todos os métodos de manipulação:
+  
+    mkdir(caminho, log)  → cria um diretório
+    rm(caminho, log)     → remove arquivo ou diretório
+    mv(origem, destino, log) → move ou renomeia
+    cp(origem, destino, log) → copia
+    write(caminho, conteudo, log) → cria ou sobrescreve arquivo
+    cd(caminho)          → muda o diretório atual
+    ls(caminho)          → lista o conteúdo de um diretório
+    cat(caminho)         → retorna o conteúdo de um arquivo
+
+  O parâmetro booleano "log" indica se a operação deve ser registrada no
+  journal. Durante o replay de recuperação, é passado como false para evitar
+  registrar novamente operações já presentes no log.
+
+  Antes de registrar no journal, o caminho relativo é convertido para absoluto
+  para garantir que o replay funcione corretamente independentemente do
+  diretório atual no momento da recuperação.
+
+CLASSE Journal (service):
+---------------------------
+  Gerencia o arquivo data/journal.log. Responsável por:
+    - Gerar IDs de transação sequenciais
+    - Escrever as linhas START e COMMIT no log
+    - Codificar argumentos em Base64 na escrita
+    - Ler e interpretar o log na inicialização
+    - Filtrar transações commitadas para o replay
+    - Limpar o log após um checkpoint bem-sucedido
+
+CLASSE Shell (shell):
+-----------------------
+  Interface interativa de linha de comando. Lê os comandos digitados pelo
+  usuário, valida os argumentos e chama os métodos correspondentes do
+  FileSystemSimulator. O comando "crash" encerra a JVM abruptamente via
+  System.exit(99), simulando uma queda de energia sem checkpoint.
+
+CLASSE Main:
+--------------
+  Ponto de entrada da aplicação. Inicializa o Journal e o FileSystemSimulator,
+  executa o replayJournal() para recuperação e inicia o Shell.
+
+================================================================================
+PARTE 4 - INSTALAÇÃO E FUNCIONAMENTO
+================================================================================
+
+REQUISITOS:
+-----------
+  - Java JDK versão 8 ou superior instalado
+  - Terminal de comandos (Prompt de Comando, PowerShell ou Bash)
+
+COMPILAÇÃO:
+-----------
+  Abra o terminal na pasta raiz do projeto e execute:
+
+  javac -encoding UTF-8 -d out src/model/*.java src/service/*.java src/shell/*.java src/Main.java
+
+EXECUÇÃO:
+---------
+  java -cp out Main
+
+  As pastas "out/" (classes compiladas) e "data/" (estado do sistema) são
+  criadas automaticamente. Não é necessário criá-las manualmente.
+
+COMANDOS DISPONÍVEIS NO SHELL:
+--------------------------------
+  help              → lista os comandos
+  ls [caminho]      → lista arquivos e pastas
+  cd <caminho>      → entra em um diretório
+  mkdir <nome>      → cria um diretório
+  touch <nome>      → cria um arquivo vazio
+  write <arq> <txt> → escreve texto em um arquivo
+  cat <arquivo>     → exibe o conteúdo de um arquivo
+  rm <caminho>      → remove arquivo ou diretório
+  mv <orig> <dest>  → move ou renomeia
+  cp <orig> <dest>  → copia
+  checkpoint        → força salvamento em disco
+  crash             → simula falha abrupta (teste de journaling)
+  exit              → salva e encerra
+
+DEMONSTRAÇÃO DO JOURNALING (TESTE DE CRASH):
+--------------------------------------------
+  Passo 1: Iniciar o simulador e criar arquivos
+    java -cp out Main
+    so-fs:/$ mkdir projetos
+    so-fs:/$ write projetos/resumo.txt Dados importantes sobre SO
+    so-fs:/$ crash          ← encerra sem salvar
+
+  Passo 2: Reiniciar o simulador
+    java -cp out Main
+    → O sistema exibe as transações sendo recuperadas pelo journal
+
+  Passo 3: Confirmar que os dados foram recuperados
+    so-fs:/$ ls
+    so-fs:/$ cat projetos/resumo.txt
+
+================================================================================
+RESULTADOS ESPERADOS
+================================================================================
+
+Com este simulador foi possível observar na prática:
+
+  1. Como um sistema de arquivos organiza dados em uma estrutura hierárquica
+     de nós (arquivos e diretórios) em memória.
+
+  2. Como o Write-Ahead Logging (WAL) garante que operações confirmadas
+     (com COMMIT no log) não sejam perdidas mesmo em caso de falha abrupta.
+
+  3. Como o mecanismo de checkpoint (serialização do estado) e o journaling
+     trabalham juntos: o checkpoint representa o estado persistido, e o
+     journal contém as operações realizadas desde o último checkpoint.
+
+  4. A diferença entre uma saída limpa (exit → checkpoint + limpeza do log)
+     e uma falha abrupta (crash → sem checkpoint, log permanece).
+
+================================================================================
+LINK DO PROJETO NO GITHUB
+================================================================================
+
+  https://github.com/SEU_USUARIO/SEU_REPOSITORIO
+
+================================================================================
